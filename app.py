@@ -2,18 +2,31 @@ import math
 
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
+from matplotlib import font_manager
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
 
-plt.rcParams["font.sans-serif"] = [
-    "Microsoft JhengHei",
-    "Microsoft YaHei",
-    "SimHei",
-    "DejaVu Sans",
-]
-plt.rcParams["axes.unicode_minus"] = False
+def configure_chinese_font():
+    preferred_fonts = [
+        "Noto Sans CJK TC",
+        "Noto Sans CJK JP",
+        "Noto Sans TC",
+        "Microsoft JhengHei",
+        "Microsoft YaHei",
+        "SimHei",
+    ]
+    installed_fonts = {font.name for font in font_manager.fontManager.ttflist}
+    available_fonts = [
+        font_name for font_name in preferred_fonts if font_name in installed_fonts
+    ]
+    plt.rcParams["font.sans-serif"] = available_fonts + ["DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+
+configure_chinese_font()
+
 
 REQUIRED_COLUMNS = [
     "箱型名稱",
@@ -25,6 +38,7 @@ REQUIRED_COLUMNS = [
     "顏色代碼(HEX)",
 ]
 ROTATION_COLUMN = "可轉向"
+PACK_COLUMN = "排入棧板"
 
 
 def parse_bool(value, default=True):
@@ -54,6 +68,8 @@ def normalize_cargo(cargo_df, pallet_length, pallet_width, default_can_rotate=Tr
     oversized_items = []
 
     for row_idx, row in cargo_df.iterrows():
+        if not parse_bool(row.get(PACK_COLUMN, True), default=True):
+            continue
         try:
             name = str(row["箱型名稱"]).strip()
             length = float(row["長度(cm)"])
@@ -984,7 +1000,12 @@ center_tolerance = st.sidebar.number_input("重心偏移警戒值 (cm)", min_val
 input_method = st.radio("請選擇數據輸入方式：", ["📋 手動在網頁輸入數據", "📁 上傳 Excel/CSV Packing List"])
 
 cargo_df = pd.DataFrame()
-rotation_column_config = {
+editor_column_config = {
+    PACK_COLUMN: st.column_config.CheckboxColumn(
+        "排入棧板",
+        help="只會計算有勾選的箱型。可只勾選相同尺寸的箱子，先查看它們排在同一棧板的結果。",
+        default=True,
+    ),
     ROTATION_COLUMN: st.column_config.CheckboxColumn(
         "可轉向",
         help="勾選後，此箱型長、寬、高都可互換擺放；取消勾選則固定原始長寬高。",
@@ -994,7 +1015,9 @@ rotation_column_config = {
 
 if input_method == "📋 手動在網頁輸入數據":
     st.subheader("✍️ 請輸入各箱型數據")
+    st.caption("使用「排入棧板」勾選本次要計算的箱型；例如只勾選相同尺寸的箱子，即可先看同尺寸打在同一板的配置。")
     default_data = {
+        PACK_COLUMN: [True, True, True, True, True],
         "箱型名稱": ["大箱", "中箱", "長條A", "長條B", "薄箱"],
         "長度(cm)": [54, 37, 88, 67, 37],
         "寬度(cm)": [45, 32, 23, 23, 32],
@@ -1007,7 +1030,7 @@ if input_method == "📋 手動在網頁輸入數據":
     cargo_df = st.data_editor(
         pd.DataFrame(default_data),
         num_rows="dynamic",
-        column_config=rotation_column_config,
+        column_config=editor_column_config,
     )
 else:
     st.subheader("📁 上傳 Packing List 檔案")
@@ -1017,19 +1040,27 @@ else:
             cargo_df = pd.read_csv(uploaded_file)
         else:
             cargo_df = pd.read_excel(uploaded_file)
+        if PACK_COLUMN not in cargo_df.columns:
+            cargo_df.insert(0, PACK_COLUMN, True)
         if ROTATION_COLUMN not in cargo_df.columns:
             cargo_df[ROTATION_COLUMN] = default_can_rotate
         st.write("📊 偵測到的 Packing List 內容：")
+        st.caption("使用「排入棧板」勾選本次要計算的箱型；未勾選的資料仍會保留在表格中，但不會參與本次打板。")
         cargo_df = st.data_editor(
             cargo_df,
             num_rows="dynamic",
-            column_config=rotation_column_config,
+            column_config=editor_column_config,
         )
 
 if not cargo_df.empty and st.button("🚀 開始智慧自動打板計算"):
     missing_columns = [col for col in REQUIRED_COLUMNS if col not in cargo_df.columns]
     if missing_columns:
         st.error(f"缺少必要欄位：{', '.join(missing_columns)}")
+        st.stop()
+    if not cargo_df[PACK_COLUMN].apply(
+        lambda value: parse_bool(value, default=True)
+    ).any():
+        st.error("請至少勾選一個要排入棧板的箱型。")
         st.stop()
 
     try:
