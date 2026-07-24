@@ -37,7 +37,9 @@ REQUIRED_COLUMNS = [
     "單箱重量(kg)",
     "顏色代碼(HEX)",
 ]
-ROTATION_COLUMN = "可轉向"
+ROTATION_COLUMN = "可平面旋轉"
+TIPPING_COLUMN = "可翻面"
+LEGACY_ROTATION_COLUMN = "可轉向"
 PACK_COLUMN = "排入棧板"
 
 
@@ -56,13 +58,35 @@ def parse_bool(value, default=True):
     return default
 
 
-def can_fit_on_pallet(length, width, pallet_length, pallet_width, can_rotate=True):
-    if length <= pallet_length and width <= pallet_width:
-        return True
-    return can_rotate and width <= pallet_length and length <= pallet_width
+def can_fit_on_pallet(
+    length,
+    width,
+    height,
+    pallet_length,
+    pallet_width,
+    can_rotate=True,
+    can_tip=False,
+):
+    base_orientations = [(length, width)]
+    if can_rotate:
+        base_orientations.append((width, length))
+    if can_tip:
+        base_orientations.extend(
+            [(length, height), (height, length), (width, height), (height, width)]
+        )
+    return any(
+        box_w <= pallet_length and box_h <= pallet_width
+        for box_w, box_h in base_orientations
+    )
 
 
-def normalize_cargo(cargo_df, pallet_length, pallet_width, default_can_rotate=True):
+def normalize_cargo(
+    cargo_df,
+    pallet_length,
+    pallet_width,
+    default_can_rotate=True,
+    default_can_tip=False,
+):
     cargo_items = []
     invalid_rows = []
     oversized_items = []
@@ -79,8 +103,15 @@ def normalize_cargo(cargo_df, pallet_length, pallet_width, default_can_rotate=Tr
             weight = float(row["單箱重量(kg)"])
             color = str(row["顏色代碼(HEX)"]).strip() or "#CCCCCC"
             can_rotate = parse_bool(
-                row.get(ROTATION_COLUMN, default_can_rotate),
+                row.get(
+                    ROTATION_COLUMN,
+                    row.get(LEGACY_ROTATION_COLUMN, default_can_rotate),
+                ),
                 default=default_can_rotate,
+            )
+            can_tip = parse_bool(
+                row.get(TIPPING_COLUMN, default_can_tip),
+                default=default_can_tip,
             )
 
             if not name or min(length, width, height, count, weight) <= 0:
@@ -102,9 +133,16 @@ def normalize_cargo(cargo_df, pallet_length, pallet_width, default_can_rotate=Tr
                 "volume": length * width * height,
                 "box_count": 1,
                 "can_rotate": can_rotate,
+                "can_tip": can_tip,
             }
             if can_fit_on_pallet(
-                length, width, pallet_length, pallet_width, can_rotate
+                length,
+                width,
+                height,
+                pallet_length,
+                pallet_width,
+                can_rotate,
+                can_tip,
             ):
                 cargo_items.append(item)
             else:
@@ -178,9 +216,10 @@ def sort_for_humanized_placement(items, mode="foundation"):
 def get_orientations(item, pallet_length, pallet_width):
     orientations = [(item["length"], item["width"], item["height"])]
     if item.get("can_rotate", True):
+        orientations.append((item["width"], item["length"], item["height"]))
+    if item.get("can_tip", False):
         for orientation in (
             (item["length"], item["height"], item["width"]),
-            (item["width"], item["length"], item["height"]),
             (item["width"], item["height"], item["length"]),
             (item["height"], item["length"], item["width"]),
             (item["height"], item["width"], item["length"]),
@@ -905,7 +944,8 @@ def add_box_trace(fig, item, layer_idx, z):
                 f"Weight: {item['weight']:.1f} kg<br>"
                 f"Support: {item.get('support_ratio', 1):.0%}<br>"
                 f"Forced: {'Yes' if item.get('forced_placement', False) else 'No'}<br>"
-                f"Can rotate: {'Yes' if item.get('can_rotate', True) else 'No'}"
+                f"Planar rotation: {'Yes' if item.get('can_rotate', True) else 'No'}<br>"
+                f"Can tip: {'Yes' if item.get('can_tip', False) else 'No'}"
                 "<extra></extra>"
             ),
             showscale=False,
@@ -983,9 +1023,14 @@ max_stack_height = st.sidebar.number_input("允許總高度 (cm)", min_value=1.0
 max_total_weight = st.sidebar.number_input("允許單棧板重量 (kg)", min_value=1.0, value=1000.0)
 max_layer_weight = st.sidebar.number_input("高度群組重量警戒值 (kg)", min_value=1.0, value=300.0)
 default_can_rotate = st.sidebar.checkbox(
-    "預設允許長寬高皆可轉向",
+    "預設允許平面旋轉 90°",
     value=True,
-    help="若資料表沒有「可轉向」欄位，會使用此預設值。勾選後長、寬、高都可互換作為底面或高度。",
+    help="箱高保持不變，只交換箱子的長與寬；可利用棧板右側等狹長空間。",
+)
+default_can_tip = st.sidebar.checkbox(
+    "預設允許箱子翻面",
+    value=False,
+    help="勾選後才允許改用箱子的長或寬作為高度。一般紙箱建議維持不勾選。",
 )
 min_support_ratio = st.sidebar.slider(
     "最小支撐比例",
@@ -1007,10 +1052,15 @@ editor_column_config = {
         default=True,
     ),
     ROTATION_COLUMN: st.column_config.CheckboxColumn(
-        "可轉向",
-        help="勾選後，此箱型長、寬、高都可互換擺放；取消勾選則固定原始長寬高。",
+        "可平面旋轉",
+        help="勾選後可在棧板平面旋轉 90°，箱高維持不變。",
         default=default_can_rotate,
-    )
+    ),
+    TIPPING_COLUMN: st.column_config.CheckboxColumn(
+        "可翻面",
+        help="勾選後才允許以箱子的其他邊作為高度。",
+        default=default_can_tip,
+    ),
 }
 
 if input_method == "📋 手動在網頁輸入數據":
@@ -1026,6 +1076,7 @@ if input_method == "📋 手動在網頁輸入數據":
         "單箱重量(kg)": [21.0, 5.7, 16.7, 19.3, 13.0],
         "顏色代碼(HEX)": ["#E5C494", "#8DA0CB", "#FC8D62", "#A6D854", "#FFD92F"],
         ROTATION_COLUMN: [True, True, True, True, True],
+        TIPPING_COLUMN: [False, False, False, False, False],
     }
     cargo_df = st.data_editor(
         pd.DataFrame(default_data),
@@ -1043,7 +1094,14 @@ else:
         if PACK_COLUMN not in cargo_df.columns:
             cargo_df.insert(0, PACK_COLUMN, True)
         if ROTATION_COLUMN not in cargo_df.columns:
-            cargo_df[ROTATION_COLUMN] = default_can_rotate
+            if LEGACY_ROTATION_COLUMN in cargo_df.columns:
+                cargo_df[ROTATION_COLUMN] = cargo_df[LEGACY_ROTATION_COLUMN]
+            else:
+                cargo_df[ROTATION_COLUMN] = default_can_rotate
+        if TIPPING_COLUMN not in cargo_df.columns:
+            cargo_df[TIPPING_COLUMN] = default_can_tip
+        if LEGACY_ROTATION_COLUMN in cargo_df.columns:
+            cargo_df = cargo_df.drop(columns=[LEGACY_ROTATION_COLUMN])
         st.write("📊 偵測到的 Packing List 內容：")
         st.caption("使用「排入棧板」勾選本次要計算的箱型；未勾選的資料仍會保留在表格中，但不會參與本次打板。")
         cargo_df = st.data_editor(
@@ -1066,7 +1124,11 @@ if not cargo_df.empty and st.button("🚀 開始智慧自動打板計算"):
     try:
         pallet_area = pallet_length * pallet_width
         cargo_items, invalid_rows, oversized_items = normalize_cargo(
-            cargo_df, pallet_length, pallet_width, default_can_rotate
+            cargo_df,
+            pallet_length,
+            pallet_width,
+            default_can_rotate,
+            default_can_tip,
         )
 
         with st.spinner("正在計算多棧板逐箱 3D 打板方案，請稍候..."):
