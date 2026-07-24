@@ -1054,12 +1054,12 @@ editor_column_config = {
     ROTATION_COLUMN: st.column_config.CheckboxColumn(
         "可平面旋轉",
         help="勾選後可在棧板平面旋轉 90°，箱高維持不變。",
-        default=default_can_rotate,
+        default=True,
     ),
     TIPPING_COLUMN: st.column_config.CheckboxColumn(
         "可翻面",
         help="勾選後才允許以箱子的其他邊作為高度。",
-        default=default_can_tip,
+        default=False,
     ),
 }
 
@@ -1078,36 +1078,56 @@ if input_method == "📋 手動在網頁輸入數據":
         ROTATION_COLUMN: [True, True, True, True, True],
         TIPPING_COLUMN: [False, False, False, False, False],
     }
+    if "manual_cargo_df" not in st.session_state:
+        st.session_state.manual_cargo_df = pd.DataFrame(default_data)
     cargo_df = st.data_editor(
-        pd.DataFrame(default_data),
+        st.session_state.manual_cargo_df,
         num_rows="dynamic",
         column_config=editor_column_config,
+        key="manual_cargo_editor",
     )
 else:
     st.subheader("📁 上傳 Packing List 檔案")
     uploaded_file = st.file_uploader("請選擇您的 Excel 或 CSV 檔案", type=["xlsx", "csv"])
     if uploaded_file is not None:
-        if uploaded_file.name.endswith(".csv"):
-            cargo_df = pd.read_csv(uploaded_file)
-        else:
-            cargo_df = pd.read_excel(uploaded_file)
-        if PACK_COLUMN not in cargo_df.columns:
-            cargo_df.insert(0, PACK_COLUMN, True)
-        if ROTATION_COLUMN not in cargo_df.columns:
-            if LEGACY_ROTATION_COLUMN in cargo_df.columns:
-                cargo_df[ROTATION_COLUMN] = cargo_df[LEGACY_ROTATION_COLUMN]
+        upload_identity = (
+            uploaded_file.name,
+            uploaded_file.size,
+            getattr(uploaded_file, "file_id", None),
+        )
+        if (
+            st.session_state.get("uploaded_file_identity") != upload_identity
+            or "uploaded_cargo_df" not in st.session_state
+        ):
+            if uploaded_file.name.endswith(".csv"):
+                uploaded_cargo_df = pd.read_csv(uploaded_file)
             else:
-                cargo_df[ROTATION_COLUMN] = default_can_rotate
-        if TIPPING_COLUMN not in cargo_df.columns:
-            cargo_df[TIPPING_COLUMN] = default_can_tip
-        if LEGACY_ROTATION_COLUMN in cargo_df.columns:
-            cargo_df = cargo_df.drop(columns=[LEGACY_ROTATION_COLUMN])
+                uploaded_cargo_df = pd.read_excel(uploaded_file)
+            if PACK_COLUMN not in uploaded_cargo_df.columns:
+                uploaded_cargo_df.insert(0, PACK_COLUMN, True)
+            if ROTATION_COLUMN not in uploaded_cargo_df.columns:
+                if LEGACY_ROTATION_COLUMN in uploaded_cargo_df.columns:
+                    uploaded_cargo_df[ROTATION_COLUMN] = uploaded_cargo_df[
+                        LEGACY_ROTATION_COLUMN
+                    ]
+                else:
+                    uploaded_cargo_df[ROTATION_COLUMN] = default_can_rotate
+            if TIPPING_COLUMN not in uploaded_cargo_df.columns:
+                uploaded_cargo_df[TIPPING_COLUMN] = default_can_tip
+            if LEGACY_ROTATION_COLUMN in uploaded_cargo_df.columns:
+                uploaded_cargo_df = uploaded_cargo_df.drop(
+                    columns=[LEGACY_ROTATION_COLUMN]
+                )
+            st.session_state.uploaded_cargo_df = uploaded_cargo_df
+            st.session_state.uploaded_file_identity = upload_identity
+            st.session_state.pop("uploaded_cargo_editor", None)
         st.write("📊 偵測到的 Packing List 內容：")
         st.caption("使用「排入棧板」勾選本次要計算的箱型；未勾選的資料仍會保留在表格中，但不會參與本次打板。")
         cargo_df = st.data_editor(
-            cargo_df,
+            st.session_state.uploaded_cargo_df,
             num_rows="dynamic",
             column_config=editor_column_config,
+            key="uploaded_cargo_editor",
         )
 
 if not cargo_df.empty and st.button("🚀 開始智慧自動打板計算"):
