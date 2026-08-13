@@ -2,6 +2,12 @@
 
 Streamlit-based 3D packing web app.
 
+## Features
+
+- Pallet loading with 3D placement, rotation, support, height, and weight checks
+- Product-to-carton packing using carton internal dimensions and gross-weight limits
+- Interactive 3D layouts, per-carton utilization, item coordinates, and unpacked-item warnings
+
 ## Local Run
 
 ```bash

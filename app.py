@@ -1008,9 +1008,326 @@ def draw_3d_stack(layer_dict, pallet_length, pallet_width, title="3D Stack View 
     return fig
 
 
-st.set_page_config(page_title="智慧 3D 打板物流優化系統", layout="wide")
+PRODUCT_PACK_COLUMN = "加入裝箱"
+PRODUCT_REQUIRED_COLUMNS = [
+    "產品名稱",
+    "長度(cm)",
+    "寬度(cm)",
+    "高度(cm)",
+    "數量(件)",
+    "單件重量(kg)",
+    "顏色代碼(HEX)",
+]
 
-st.title("📦 智慧 3D 打板物流優化系統")
+
+def normalize_products(
+    product_df,
+    carton_length,
+    carton_width,
+    default_can_rotate=True,
+    default_can_tip=False,
+):
+    """Convert product input columns to the common 3D packing item format."""
+    cargo_df = product_df.rename(
+        columns={
+            PRODUCT_PACK_COLUMN: PACK_COLUMN,
+            "產品名稱": "箱型名稱",
+            "數量(件)": "數量(箱)",
+            "單件重量(kg)": "單箱重量(kg)",
+        }
+    )
+    return normalize_cargo(
+        cargo_df,
+        carton_length,
+        carton_width,
+        default_can_rotate,
+        default_can_tip,
+    )
+
+
+def pack_cartons_3d(
+    product_items,
+    carton_length,
+    carton_width,
+    carton_height,
+    max_product_weight,
+    max_carton_count,
+    min_support_ratio,
+):
+    """Pack products into closed cartons without any forced/invalid placement."""
+    carton_layouts = []
+    remaining_items = product_items[:]
+
+    for carton_idx in range(int(max_carton_count)):
+        if not remaining_items:
+            break
+        layer_dict, next_remaining = pack_single_pallet_3d(
+            remaining_items,
+            carton_length,
+            carton_width,
+            carton_height,
+            max_product_weight,
+            min_support_ratio,
+            height_tolerance=0.001,
+        )
+        if not layer_dict:
+            break
+        carton_layouts.append(
+            {
+                "carton_idx": carton_idx,
+                "layer_dict": layer_dict,
+            }
+        )
+        remaining_items = next_remaining
+
+    return carton_layouts, remaining_items
+
+
+def draw_3d_carton(layer_dict, carton_length, carton_width, carton_height, title):
+    fig = draw_3d_stack(
+        layer_dict,
+        carton_length,
+        carton_width,
+        title=title,
+    )
+    vertices = cuboid_vertices(0, 0, 0, carton_length, carton_width, carton_height)
+    edges = [
+        (0, 1), (1, 2), (2, 3), (3, 0),
+        (4, 5), (5, 6), (6, 7), (7, 4),
+        (0, 4), (1, 5), (2, 6), (3, 7),
+    ]
+    for start_idx, end_idx in edges:
+        start = vertices[start_idx]
+        end = vertices[end_idx]
+        fig.add_trace(
+            go.Scatter3d(
+                x=[start[0], end[0]],
+                y=[start[1], end[1]],
+                z=[start[2], end[2]],
+                mode="lines",
+                line={"color": "#444444", "width": 4},
+                hoverinfo="skip",
+                showlegend=False,
+            )
+        )
+    fig.update_layout(
+        scene={
+            "xaxis_title": "Length (cm)",
+            "yaxis_title": "Width (cm)",
+            "zaxis_title": "Height (cm)",
+            "xaxis": {"range": [0, carton_length]},
+            "yaxis": {"range": [0, carton_width]},
+            "zaxis": {"range": [0, carton_height]},
+            "aspectmode": "data",
+        }
+    )
+    return fig
+
+
+def render_carton_packing_mode():
+    st.markdown(
+        "輸入產品尺寸、數量與外箱 **內部尺寸**，系統會計算擺放方向、可裝數量、重量與空間利用率。"
+    )
+
+    st.sidebar.header("📦 大外箱規格設定")
+    carton_length = st.sidebar.number_input("外箱內部長度 (cm)", min_value=0.1, value=60.0)
+    carton_width = st.sidebar.number_input("外箱內部寬度 (cm)", min_value=0.1, value=40.0)
+    carton_height = st.sidebar.number_input("外箱內部高度 (cm)", min_value=0.1, value=40.0)
+    carton_tare_weight = st.sidebar.number_input("外箱空箱重量 (kg)", min_value=0.0, value=1.0)
+    max_gross_weight = st.sidebar.number_input("單箱最大毛重 (kg)", min_value=0.1, value=25.0)
+    max_carton_count = st.sidebar.number_input(
+        "最多可使用外箱數量", min_value=1, max_value=100, value=10
+    )
+    default_can_rotate = st.sidebar.checkbox("預設允許平面旋轉 90°", value=True)
+    default_can_tip = st.sidebar.checkbox(
+        "預設允許產品翻面",
+        value=False,
+        help="易碎品、有固定朝向或可能漏液的產品請勿勾選。",
+    )
+    min_support_ratio = st.sidebar.slider(
+        "最小支撐比例",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.8,
+        step=0.05,
+    )
+
+    default_products = {
+        PRODUCT_PACK_COLUMN: [True, True],
+        "產品名稱": ["產品 A", "產品 B"],
+        "長度(cm)": [20.0, 15.0],
+        "寬度(cm)": [10.0, 10.0],
+        "高度(cm)": [8.0, 12.0],
+        "數量(件)": [12, 6],
+        "單件重量(kg)": [0.8, 0.5],
+        "顏色代碼(HEX)": ["#8DA0CB", "#FC8D62"],
+        ROTATION_COLUMN: [True, True],
+        TIPPING_COLUMN: [False, False],
+    }
+    if "product_packing_df" not in st.session_state:
+        st.session_state.product_packing_df = pd.DataFrame(default_products)
+
+    st.subheader("✍️ 產品資料")
+    st.caption("精確排法需要產品的長、寬、高；只有總體積或材積重量無法判斷實際是否能放入。")
+    product_df = st.data_editor(
+        st.session_state.product_packing_df,
+        num_rows="dynamic",
+        column_config={
+            PRODUCT_PACK_COLUMN: st.column_config.CheckboxColumn("加入裝箱", default=True),
+            ROTATION_COLUMN: st.column_config.CheckboxColumn("可平面旋轉", default=True),
+            TIPPING_COLUMN: st.column_config.CheckboxColumn("可翻面", default=False),
+        },
+        key="product_packing_editor",
+        use_container_width=True,
+    )
+
+    if not st.button("🧮 開始產品裝箱計算", type="primary"):
+        return
+
+    missing_columns = [col for col in PRODUCT_REQUIRED_COLUMNS if col not in product_df.columns]
+    if missing_columns:
+        st.error(f"缺少必要欄位：{', '.join(missing_columns)}")
+        return
+    if PRODUCT_PACK_COLUMN not in product_df.columns or not product_df[
+        PRODUCT_PACK_COLUMN
+    ].apply(lambda value: parse_bool(value, default=True)).any():
+        st.error("請至少勾選一項要加入裝箱的產品。")
+        return
+
+    max_product_weight = max_gross_weight - carton_tare_weight
+    if max_product_weight <= 0:
+        st.error("單箱最大毛重必須大於外箱空箱重量。")
+        return
+
+    product_items, invalid_rows, base_oversized_items = normalize_products(
+        product_df,
+        carton_length,
+        carton_width,
+        default_can_rotate,
+        default_can_tip,
+    )
+    if invalid_rows:
+        st.warning(f"以下資料列格式不正確，已略過：{invalid_rows}")
+
+    with st.spinner("正在尋找 3D 裝箱擺法..."):
+        carton_layouts, unpacked_items = pack_cartons_3d(
+            product_items,
+            carton_length,
+            carton_width,
+            carton_height,
+            max_product_weight,
+            int(max_carton_count),
+            min_support_ratio,
+        )
+
+    unpacked_items = base_oversized_items + unpacked_items
+    packed_items = [
+        item
+        for layout in carton_layouts
+        for item in flatten_layer_dict(layout["layer_dict"])
+    ]
+    requested_count = len(product_items) + len(base_oversized_items)
+    packed_count = len(packed_items)
+    unpacked_count = len(unpacked_items)
+    total_net_weight = sum(item["weight"] for item in packed_items)
+    total_gross_weight = total_net_weight + len(carton_layouts) * carton_tare_weight
+    carton_volume = carton_length * carton_width * carton_height
+    packed_volume = sum(item["volume"] for item in packed_items)
+    overall_utilization = (
+        packed_volume / (carton_volume * len(carton_layouts))
+        if carton_layouts
+        else 0
+    )
+
+    if requested_count and unpacked_count == 0:
+        st.success(f"全部 {requested_count} 件產品可裝入，共需要 {len(carton_layouts)} 個外箱。")
+    elif packed_count:
+        st.warning(
+            f"目前可裝入 {packed_count} / {requested_count} 件，仍有 {unpacked_count} 件無法裝入。"
+        )
+    else:
+        st.error("沒有產品能在目前的尺寸、方向與重量限制下裝入外箱。")
+
+    metric_cols = st.columns(5)
+    metric_cols[0].metric("已裝件數", f"{packed_count} / {requested_count}")
+    metric_cols[1].metric("使用外箱", len(carton_layouts))
+    metric_cols[2].metric("產品淨重", f"{total_net_weight:.2f} kg")
+    metric_cols[3].metric("合計毛重", f"{total_gross_weight:.2f} kg")
+    metric_cols[4].metric("平均空間利用率", f"{overall_utilization:.1%}")
+
+    if unpacked_items:
+        unpacked_summary = {}
+        for item in unpacked_items:
+            unpacked_summary[item["name"]] = unpacked_summary.get(item["name"], 0) + 1
+        st.warning(
+            "未裝入產品："
+            + "、".join(f"{name} {count} 件" for name, count in unpacked_summary.items())
+            + "。可能原因為尺寸、可用箱數、承重或擺放方向限制。"
+        )
+
+    if not carton_layouts:
+        return
+
+    summary_rows = []
+    for layout in carton_layouts:
+        items = flatten_layer_dict(layout["layer_dict"])
+        net_weight = sum(item["weight"] for item in items)
+        summary_rows.append(
+            {
+                "外箱": layout["carton_idx"] + 1,
+                "產品件數": len(items),
+                "產品淨重(kg)": round(net_weight, 2),
+                "外箱毛重(kg)": round(net_weight + carton_tare_weight, 2),
+                "實際使用高度(cm)": round(calculate_pallet_height(layout["layer_dict"]), 2),
+                "空間利用率": f"{sum(item['volume'] for item in items) / carton_volume:.1%}",
+            }
+        )
+    st.subheader("📊 外箱摘要")
+    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+
+    st.subheader("🧊 3D 裝箱擺法")
+    for layout in carton_layouts:
+        carton_no = layout["carton_idx"] + 1
+        items = flatten_layer_dict(layout["layer_dict"])
+        with st.expander(f"外箱 {carton_no}｜{len(items)} 件產品", expanded=carton_no == 1):
+            st.plotly_chart(
+                draw_3d_carton(
+                    layout["layer_dict"],
+                    carton_length,
+                    carton_width,
+                    carton_height,
+                    title=f"外箱 {carton_no} - 3D 裝箱配置",
+                ),
+                use_container_width=True,
+            )
+            position_rows = [
+                {
+                    "產品": item["name"],
+                    "X(cm)": item["x"],
+                    "Y(cm)": item["y"],
+                    "Z(cm)": item["z"],
+                    "擺放尺寸(cm)": f"{item['box_w']:g} × {item['box_h']:g} × {placed_height(item):g}",
+                    "方向": item.get("orientation", "原方向"),
+                    "重量(kg)": item["weight"],
+                }
+                for item in sorted(items, key=lambda value: (value["z"], value["y"], value["x"]))
+            ]
+            st.dataframe(pd.DataFrame(position_rows), use_container_width=True, hide_index=True)
+
+
+st.set_page_config(page_title="智慧 3D 物流裝載優化系統", layout="wide")
+
+st.title("📦 智慧 3D 物流裝載優化系統")
+operation_mode = st.radio(
+    "功能模式",
+    ["🧱 棧板打板", "📦 產品裝箱"],
+    horizontal=True,
+)
+
+if operation_mode == "📦 產品裝箱":
+    render_carton_packing_mode()
+    st.stop()
+
 st.markdown(
     "本系統改用 **逐箱 3D 打板邏輯**：每一箱會依棧板面與已放置箱子的上表面尋找位置，不再先假設完整平面層。"
 )
