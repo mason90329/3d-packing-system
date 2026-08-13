@@ -1018,6 +1018,41 @@ PRODUCT_REQUIRED_COLUMNS = [
     "單件重量(kg)",
     "顏色代碼(HEX)",
 ]
+PRODUCT_COLOR_PALETTE = [
+    "#8DA0CB",
+    "#FC8D62",
+    "#66C2A5",
+    "#E78AC3",
+    "#A6D854",
+    "#FFD92F",
+    "#E5C494",
+    "#B3B3B3",
+]
+
+
+def get_next_product_color(product_df):
+    used_colors = {
+        str(value).strip().upper()
+        for value in product_df.get("顏色代碼(HEX)", pd.Series(dtype=str)).dropna()
+        if str(value).strip()
+    }
+    for color in PRODUCT_COLOR_PALETTE:
+        if color.upper() not in used_colors:
+            return color
+    return PRODUCT_COLOR_PALETTE[len(product_df) % len(PRODUCT_COLOR_PALETTE)]
+
+
+def fill_missing_product_colors(product_df):
+    completed_df = product_df.copy()
+    if "顏色代碼(HEX)" not in completed_df.columns:
+        completed_df["顏色代碼(HEX)"] = ""
+    for position, row_idx in enumerate(completed_df.index):
+        color = completed_df.at[row_idx, "顏色代碼(HEX)"]
+        if pd.isna(color) or not str(color).strip() or str(color).strip().lower() == "nan":
+            completed_df.at[row_idx, "顏色代碼(HEX)"] = PRODUCT_COLOR_PALETTE[
+                position % len(PRODUCT_COLOR_PALETTE)
+            ]
+    return completed_df
 
 
 def normalize_products(
@@ -1166,6 +1201,8 @@ def render_carton_packing_mode():
     }
     if "product_packing_df" not in st.session_state:
         st.session_state.product_packing_df = pd.DataFrame(default_products)
+    if "product_editor_version" not in st.session_state:
+        st.session_state.product_editor_version = 0
 
     st.subheader("✍️ 產品資料")
     st.caption("精確排法需要產品的長、寬、高；只有總體積或材積重量無法判斷實際是否能放入。")
@@ -1176,13 +1213,72 @@ def render_carton_packing_mode():
             PRODUCT_PACK_COLUMN: st.column_config.CheckboxColumn("加入裝箱", default=True),
             ROTATION_COLUMN: st.column_config.CheckboxColumn("可平面旋轉", default=True),
             TIPPING_COLUMN: st.column_config.CheckboxColumn("可翻面", default=False),
+            "顏色代碼(HEX)": st.column_config.TextColumn(
+                "顏色代碼(HEX)",
+                help="可輸入例如 #8DA0CB；也可使用下方快速新增產品的選色器。",
+            ),
         },
-        key="product_packing_editor",
+        key=f"product_packing_editor_{st.session_state.product_editor_version}",
         use_container_width=True,
     )
 
+    with st.expander("➕ 快速新增產品（可直接選顏色）"):
+        with st.form("quick_add_product_form", clear_on_submit=True):
+            input_cols = st.columns(4)
+            new_product_name = input_cols[0].text_input("產品名稱")
+            new_product_length = input_cols[1].number_input(
+                "長度 (cm)", min_value=0.1, value=10.0
+            )
+            new_product_width = input_cols[2].number_input(
+                "寬度 (cm)", min_value=0.1, value=10.0
+            )
+            new_product_height = input_cols[3].number_input(
+                "高度 (cm)", min_value=0.1, value=10.0
+            )
+            detail_cols = st.columns(5)
+            new_product_count = detail_cols[0].number_input(
+                "數量 (件)", min_value=1, value=1, step=1
+            )
+            new_product_weight = detail_cols[1].number_input(
+                "單件重量 (kg)", min_value=0.01, value=1.0
+            )
+            new_product_color = detail_cols[2].color_picker(
+                "產品顏色", value=get_next_product_color(product_df)
+            )
+            new_can_rotate = detail_cols[3].checkbox("可平面旋轉", value=True)
+            new_can_tip = detail_cols[4].checkbox("可翻面", value=False)
+            add_product = st.form_submit_button("新增到產品表格", type="primary")
+
+        if add_product:
+            if not new_product_name.strip():
+                st.error("請輸入產品名稱。")
+            else:
+                new_row = pd.DataFrame(
+                    [
+                        {
+                            PRODUCT_PACK_COLUMN: True,
+                            "產品名稱": new_product_name.strip(),
+                            "長度(cm)": float(new_product_length),
+                            "寬度(cm)": float(new_product_width),
+                            "高度(cm)": float(new_product_height),
+                            "數量(件)": int(new_product_count),
+                            "單件重量(kg)": float(new_product_weight),
+                            "顏色代碼(HEX)": new_product_color,
+                            ROTATION_COLUMN: new_can_rotate,
+                            TIPPING_COLUMN: new_can_tip,
+                        }
+                    ]
+                )
+                st.session_state.product_packing_df = pd.concat(
+                    [product_df, new_row], ignore_index=True
+                )
+                st.session_state.product_editor_version += 1
+                st.rerun()
+
     if not st.button("🧮 開始產品裝箱計算", type="primary"):
         return
+
+    product_df = fill_missing_product_colors(product_df)
 
     missing_columns = [col for col in PRODUCT_REQUIRED_COLUMNS if col not in product_df.columns]
     if missing_columns:
