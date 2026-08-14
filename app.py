@@ -1018,7 +1018,7 @@ PRODUCT_REQUIRED_COLUMNS = [
     "單件重量(kg)",
     "顏色代碼(HEX)",
 ]
-PRODUCT_COLOR_PALETTE = [
+AUTO_COLOR_PALETTE = [
     "#8DA0CB",
     "#FC8D62",
     "#66C2A5",
@@ -1030,27 +1030,28 @@ PRODUCT_COLOR_PALETTE = [
 ]
 
 
-def get_next_product_color(product_df):
+def get_next_auto_color(data_df):
     used_colors = {
         str(value).strip().upper()
-        for value in product_df.get("顏色代碼(HEX)", pd.Series(dtype=str)).dropna()
+        for value in data_df.get("顏色代碼(HEX)", pd.Series(dtype=str)).dropna()
         if str(value).strip()
     }
-    for color in PRODUCT_COLOR_PALETTE:
+    for color in AUTO_COLOR_PALETTE:
         if color.upper() not in used_colors:
             return color
-    return PRODUCT_COLOR_PALETTE[len(product_df) % len(PRODUCT_COLOR_PALETTE)]
+    return AUTO_COLOR_PALETTE[len(data_df) % len(AUTO_COLOR_PALETTE)]
 
 
-def fill_missing_product_colors(product_df):
-    completed_df = product_df.copy()
+def fill_missing_colors(data_df):
+    """Assign stable palette colors to rows with a missing HEX color value."""
+    completed_df = data_df.copy()
     if "顏色代碼(HEX)" not in completed_df.columns:
         completed_df["顏色代碼(HEX)"] = ""
     for position, row_idx in enumerate(completed_df.index):
         color = completed_df.at[row_idx, "顏色代碼(HEX)"]
         if pd.isna(color) or not str(color).strip() or str(color).strip().lower() == "nan":
-            completed_df.at[row_idx, "顏色代碼(HEX)"] = PRODUCT_COLOR_PALETTE[
-                position % len(PRODUCT_COLOR_PALETTE)
+            completed_df.at[row_idx, "顏色代碼(HEX)"] = AUTO_COLOR_PALETTE[
+                position % len(AUTO_COLOR_PALETTE)
             ]
     return completed_df
 
@@ -1243,7 +1244,7 @@ def render_carton_packing_mode():
                 "單件重量 (kg)", min_value=0.01, value=1.0
             )
             new_product_color = detail_cols[2].color_picker(
-                "產品顏色", value=get_next_product_color(product_df)
+                "產品顏色", value=get_next_auto_color(product_df)
             )
             new_can_rotate = detail_cols[3].checkbox("可平面旋轉", value=True)
             new_can_tip = detail_cols[4].checkbox("可翻面", value=False)
@@ -1278,7 +1279,7 @@ def render_carton_packing_mode():
     if not st.button("🧮 開始產品裝箱計算", type="primary"):
         return
 
-    product_df = fill_missing_product_colors(product_df)
+    product_df = fill_missing_colors(product_df)
 
     missing_columns = [col for col in PRODUCT_REQUIRED_COLUMNS if col not in product_df.columns]
     if missing_columns:
@@ -1474,11 +1475,15 @@ editor_column_config = {
         help="勾選後才允許以箱子的其他邊作為高度。",
         default=False,
     ),
+    "顏色代碼(HEX)": st.column_config.TextColumn(
+        "顏色代碼(HEX)",
+        help="可自行輸入例如 #8DA0CB；留白時系統會自動分配顏色。",
+    ),
 }
 
 if input_method == "📋 手動在網頁輸入數據":
     st.subheader("✍️ 請輸入各箱型數據")
-    st.caption("使用「排入棧板」勾選本次要計算的箱型；例如只勾選相同尺寸的箱子，即可先看同尺寸打在同一板的配置。")
+    st.caption("使用「排入棧板」勾選本次要計算的箱型；新增箱型若未填顏色代碼，系統會自動分配顏色。")
     default_data = {
         PACK_COLUMN: [True, True, True, True, True],
         "箱型名稱": ["大箱", "中箱", "長條A", "長條B", "薄箱"],
@@ -1531,6 +1536,7 @@ else:
                 uploaded_cargo_df = uploaded_cargo_df.drop(
                     columns=[LEGACY_ROTATION_COLUMN]
                 )
+            uploaded_cargo_df = fill_missing_colors(uploaded_cargo_df)
             st.session_state.uploaded_cargo_df = uploaded_cargo_df
             st.session_state.uploaded_file_identity = upload_identity
             st.session_state.pop("uploaded_cargo_editor", None)
@@ -1544,6 +1550,7 @@ else:
         )
 
 if not cargo_df.empty and st.button("🚀 開始智慧自動打板計算"):
+    cargo_df = fill_missing_colors(cargo_df)
     missing_columns = [col for col in REQUIRED_COLUMNS if col not in cargo_df.columns]
     if missing_columns:
         st.error(f"缺少必要欄位：{', '.join(missing_columns)}")
